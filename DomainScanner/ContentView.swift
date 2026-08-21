@@ -1,6 +1,6 @@
 import SwiftUI
 
-// --- LIQUID GLASS VIEW MODIFIER (Automaattinen yhteensopivuus) ---
+// --- LIQUID GLASS VIEW MODIFIER ---
 enum GlassShapeType {
     case rounded(CGFloat)
     case capsule
@@ -17,9 +17,9 @@ struct LiquidGlassModifier: ViewModifier {
             case .rounded(let radius):
                 content.glassEffect(isClear ? .clear : .regular, in: .rect(cornerRadius: radius))
             case .capsule:
-                content.glassEffect(isClear ? .clear : .capsule, in: .capsule)
+                content.glassEffect(isClear ? .clear : .regular, in: .capsule)
             case .circle:
-                content.glassEffect(isClear ? .clear : .circle, in: .circle)
+                content.glassEffect(isClear ? .clear : .regular, in: .circle)
             }
         } else {
             // Natiivi iOS 17/18/19+ nestemäinen lasi valotaitolla
