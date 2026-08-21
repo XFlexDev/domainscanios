@@ -1,5 +1,73 @@
 import SwiftUI
 
+// --- LIQUID GLASS VIEW MODIFIER (Automaattinen yhteensopivuus) ---
+enum GlassShapeType {
+    case rounded(CGFloat)
+    case capsule
+    case circle
+}
+
+struct LiquidGlassModifier: ViewModifier {
+    var shape: GlassShapeType
+    var isClear: Bool = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            switch shape {
+            case .rounded(let radius):
+                content.glassEffect(isClear ? .clear : .regular, in: .rect(cornerRadius: radius))
+            case .capsule:
+                content.glassEffect(isClear ? .clear : .capsule, in: .capsule)
+            case .circle:
+                content.glassEffect(isClear ? .clear : .circle, in: .circle)
+            }
+        } else {
+            // Natiivi iOS 17/18/19+ nestemäinen lasi valotaitolla
+            switch shape {
+            case .rounded(let radius):
+                content
+                    .background(isClear ? .thinMaterial : .ultraThinMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.45), Color.white.opacity(0.1)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+                    )
+                    .shadow(color: Color.black.opacity(0.06), radius: 10, y: 4)
+
+            case .capsule:
+                content
+                    .background(isClear ? .thinMaterial : .ultraThinMaterial, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    )
+
+            case .circle:
+                content
+                    .background(isClear ? .thinMaterial : .ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    )
+            }
+        }
+    }
+}
+
+extension View {
+    func liquidGlass(_ shape: GlassShapeType = .rounded(16), isClear: Bool = false) -> some View {
+        self.modifier(LiquidGlassModifier(shape: shape, isClear: isClear))
+    }
+}
+
+// --- PÄÄNÄKYMÄ ---
+
 struct ContentView: View {
     @State private var targetDomain: String = ""
     @State private var filterQuery: String = ""
@@ -22,7 +90,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // Taustalla hienovarainen dynaaminen sävy, joka herättää Liquid Glass -taittumisen eloon
+                // Taustaliukuväri lasin heijastuksia varten
                 LinearGradient(
                     colors: [
                         Color.blue.opacity(0.12),
@@ -36,7 +104,7 @@ struct ContentView: View {
 
                 VStack(spacing: 0) {
                     
-                    // --- NESTEMÄINEN LASIHAKUPALKKI (Liquid Glass Floating Panel) ---
+                    // --- NESTEMÄINEN LASIPANEELI (Haku) ---
                     VStack(spacing: 12) {
                         HStack(spacing: 12) {
                             Image(systemName: "magnifyingglass")
@@ -63,8 +131,7 @@ struct ContentView: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
-                        // Aito iOS 26 Liquid Glass -määre
-                        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                        .liquidGlass(.rounded(18))
 
                         // Historia-chipit nestelasilla
                         if !history.isEmpty {
@@ -85,7 +152,7 @@ struct ContentView: View {
                                             .padding(.vertical, 7)
                                         }
                                         .buttonStyle(.plain)
-                                        .glassEffect(.clear, in: .capsule)
+                                        .liquidGlass(.capsule, isClear: true)
                                     }
                                 }
                                 .padding(.horizontal, 2)
@@ -109,8 +176,8 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+                            .padding(.vertical, 10)
+                            .liquidGlass(.rounded(14))
                             .padding(.horizontal, 16)
 
                             // Suodatus
@@ -124,7 +191,7 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
-                                .glassEffect(.clear, in: .rect(cornerRadius: 10))
+                                .liquidGlass(.rounded(10), isClear: true)
                                 .padding(.horizontal, 16)
                             }
                         }
@@ -158,7 +225,7 @@ struct ContentView: View {
                             Image(systemName: "square.and.arrow.up")
                                 .padding(8)
                         }
-                        .glassEffect(.clear, in: .circle)
+                        .liquidGlass(.circle, isClear: true)
                     }
                 }
             }
