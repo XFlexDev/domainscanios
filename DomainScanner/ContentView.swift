@@ -20,20 +20,41 @@ struct ScanRecord: Identifiable, Codable, Equatable {
 }
 
 enum SortOption: String, CaseIterable, Identifiable {
-    case nameAsc = "A → Z"
-    case nameDesc = "Z → A"
-    case lenAsc = "Shortest"
-    case lenDesc = "Longest"
+    case nameAsc = "Alphabetical (A–Z)"
+    case nameDesc = "Alphabetical (Z–A)"
+    case lenAsc = "Shortest First"
+    case lenDesc = "Longest First"
 
     var id: String { rawValue }
 }
 
 enum ExportType: String, CaseIterable, Identifiable {
     case txt = "Plain Text (.txt)"
-    case json = "JSON Array (.json)"
+    case json = "JSON Payload (.json)"
     case csv = "CSV Spreadsheet (.csv)"
 
     var id: String { rawValue }
+}
+
+// MARK: - Haptic Engine
+
+final class HapticEngine {
+    static let shared = HapticEngine()
+    private init() {}
+
+    private let light = UIImpactFeedbackGenerator(style: .light)
+    private let medium = UIImpactFeedbackGenerator(style: .medium)
+    private let rigid = UIImpactFeedbackGenerator(style: .rigid)
+    private let heavy = UIImpactFeedbackGenerator(style: .heavy)
+    private let notification = UINotificationFeedbackGenerator()
+    private let selection = UISelectionFeedbackGenerator()
+
+    func feedbackLight() { light.impactOccurred() }
+    func feedbackMedium() { medium.impactOccurred() }
+    func feedbackRigid() { rigid.impactOccurred() }
+    func feedbackHeavy() { heavy.impactOccurred() }
+    func feedbackSuccess() { notification.notificationOccurred(.success) }
+    func feedbackSelection() { selection.selectionChanged() }
 }
 
 // MARK: - State Store
@@ -45,8 +66,8 @@ final class AppStore: ObservableObject {
     @Published var activeRecord: ScanRecord?
     @Published var isScanning: Bool = false
 
-    private let historyKey = "domain_scanner_history_v4"
-    private let favoritesKey = "domain_scanner_favorites_v4"
+    private let historyKey = "recon_history_v5"
+    private let favoritesKey = "recon_favorites_v5"
 
     init() {
         loadStorage()
@@ -65,13 +86,13 @@ final class AppStore: ObservableObject {
     func recordScan(_ record: ScanRecord) {
         history.removeAll { $0.domain.lowercased() == record.domain.lowercased() }
         history.insert(record, at: 0)
-        if history.count > 50 { history = Array(history.prefix(50)) }
-        persistHistory()
+        if history.count > 60 { history = Array(history.prefix(60)) }
+        persist()
     }
 
     func deleteRecord(at offsets: IndexSet) {
         history.remove(atOffsets: offsets)
-        persistHistory()
+        persist()
     }
 
     func clearHistory() {
@@ -88,19 +109,18 @@ final class AppStore: ObservableObject {
         UserDefaults.standard.set(Array(favorites), forKey: favoritesKey)
     }
 
-    private func persistHistory() {
+    private func persist() {
         if let data = try? JSONEncoder().encode(history) {
             UserDefaults.standard.set(data, forKey: historyKey)
         }
     }
 }
 
-// MARK: - Main View
+// MARK: - Main Interface
 
 struct ContentView: View {
     @StateObject private var store = AppStore()
     private let engine = ScannerEngine()
-    private let haptic = UIImpactFeedbackGenerator(style: .medium)
 
     @State private var targetInput: String = ""
     @State private var filterQuery: String = ""
@@ -108,9 +128,11 @@ struct ContentView: View {
     @State private var onlyFavorites: Bool = false
     @State private var showHistorySheet: Bool = false
     @State private var showExportSheet: Bool = false
-    @State private var toastText: String?
 
-    // MARK: - Computed Filter & Sort
+    // Snackbar State
+    @State private var snackbarText: String?
+    @State private var snackbarIcon: String = "checkmark.circle.fill"
+    @State private var pulseStream: Bool = false
 
     private var filteredResults: [String] {
         guard let record = store.activeRecord else { return [] }
@@ -142,7 +164,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
+            ZStack(alignment: .top) {
                 Color(uiColor: .systemGroupedBackground)
                     .ignoresSafeArea()
 
@@ -150,50 +172,41 @@ struct ContentView: View {
                     searchHeaderSection
 
                     if store.isScanning {
-                        radarScannerSection
-                            .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                        telemetryPipelineView
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
                     } else if let record = store.activeRecord {
                         dashboardResultsSection(for: record)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(.opacity)
                     } else {
-                        emptyStateHeroSection
+                        idleHeroSection
                             .transition(.opacity)
                     }
                 }
 
-                // Toast Notification
-                if let msg = toastText {
-                    VStack {
-                        Spacer()
-                        HStack(spacing: 8) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.cyan)
-                            Text(msg)
-                                .font(.subheadline.weight(.medium))
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.ultraThickMaterial)
-                        .clipShape(Capsule())
-                        .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
-                        .padding(.bottom, 24)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
+                // Professional Floating Snackbar
+                if let msg = snackbarText {
+                    snackbarOverlay(message: msg)
+                        .padding(.top, 12)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.92)),
+                            removal: .move(edge: .top).combined(with: .opacity)
+                        ))
+                        .zIndex(999)
                 }
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.isScanning)
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.activeRecord)
-            .animation(.easeInOut(duration: 0.2), value: toastText)
-            .navigationTitle("Recon OSINT")
+            .animation(.spring(response: 0.35, dampingFraction: 0.82), value: store.isScanning)
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: store.activeRecord)
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: snackbarText)
+            .navigationTitle("Intelligence Recon")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        haptic.impactOccurred()
+                        HapticEngine.shared.feedbackMedium()
                         showHistorySheet = true
                     } label: {
                         Image(systemName: "clock.arrow.2.circlepath")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                     }
                 }
 
@@ -201,19 +214,20 @@ struct ContentView: View {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button {
+                                HapticEngine.shared.feedbackSelection()
                                 showExportSheet = true
                             } label: {
-                                Label("Export Data", systemImage: "square.and.arrow.up")
+                                Label("Export Intelligence", systemImage: "square.and.arrow.up")
                             }
 
                             Button {
                                 copyAll()
                             } label: {
-                                Label("Copy All Subdomains", systemImage: "doc.on.doc")
+                                Label("Copy All Identifiers", systemImage: "doc.on.doc")
                             }
                         } label: {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 15, weight: .semibold))
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 14, weight: .semibold))
                         }
                     }
                 }
@@ -233,17 +247,20 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
+                    Image(systemName: "terminal")
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
                         .foregroundColor(.secondary)
 
-                    TextField("Target apex (e.g. stripe.com)", text: $targetInput)
+                    TextField("Target host (e.g. cloudflare.com)", text: $targetInput)
+                        .font(.system(size: 15, weight: .regular, design: .monospaced))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .onSubmit { performScan(targetInput) }
+                        .submitLabel(.go)
+                        .onSubmit { executeDiscovery(targetInput) }
 
                     if !targetInput.isEmpty {
                         Button {
+                            HapticEngine.shared.feedbackLight()
                             targetInput = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -254,46 +271,55 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .cornerRadius(12)
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(uiColor: .separator).opacity(0.3), lineWidth: 1)
+                )
 
                 Button {
-                    performScan(targetInput)
+                    executeDiscovery(targetInput)
                 } label: {
                     ZStack {
-                        Circle()
-                            .fill(targetInput.isEmpty || store.isScanning ? Color.secondary.opacity(0.2) : Color.accentColor)
-                            .frame(width: 42, height: 42)
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(targetInput.isEmpty || store.isScanning ? Color.secondary.opacity(0.15) : Color.accentColor)
+                            .frame(width: 44, height: 42)
 
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundColor(.white)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(targetInput.isEmpty || store.isScanning ? .secondary : .white)
                     }
                 }
                 .disabled(targetInput.isEmpty || store.isScanning)
             }
             .padding(.horizontal)
-            .padding(.top, 6)
+            .padding(.top, 8)
 
-            // History Quick Chips
+            // Quick History Bar
             if !store.history.isEmpty && store.activeRecord == nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(Array(store.history.prefix(6)), id: \.id) { (item: ScanRecord) in
+                        ForEach(Array(store.history.prefix(5)), id: \.id) { (item: ScanRecord) in
                             Button {
+                                HapticEngine.shared.feedbackSelection()
                                 targetInput = item.domain
-                                performScan(item.domain)
+                                executeDiscovery(item.domain)
                             } label: {
                                 HStack(spacing: 4) {
                                     Image(systemName: "arrow.counterclockwise")
-                                        .font(.system(size: 10))
+                                        .font(.system(size: 9))
                                     Text(item.domain)
-                                        .font(.caption.weight(.medium))
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                                 }
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
+                                .padding(.vertical, 5)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                                 .foregroundColor(.primary)
-                                .cornerRadius(8)
+                                .cornerRadius(6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+                                )
                             }
                         }
                     }
@@ -304,72 +330,119 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Scanning Radar Animation
+    // MARK: - Redesigned Live Telemetry Pipeline (Scanning State)
 
-    private var radarScannerSection: some View {
+    private var telemetryPipelineView: some View {
         VStack(spacing: 24) {
             Spacer()
 
-            ZStack {
-                Circle()
-                    .stroke(Color.accentColor.opacity(0.12), lineWidth: 40)
-                    .frame(width: 130, height: 130)
+            VStack(spacing: 12) {
+                // Target Pill
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 8, height: 8)
+                        .opacity(pulseStream ? 1.0 : 0.3)
 
-                Circle()
-                    .trim(from: 0, to: 0.65)
-                    .stroke(
-                        AngularGradient(
-                            colors: [.accentColor.opacity(0.1), .accentColor],
-                            center: .center
-                        ),
-                        style: StrokeStyle(lineWidth: 6, lineCap: .round)
-                    )
-                    .frame(width: 100, height: 100)
-                    .rotationEffect(.degrees(store.isScanning ? 360 : 0))
-                    .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: store.isScanning)
+                    Text("QUERYING OSINT STREAMS")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(.blue)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.1))
+                .clipShape(Capsule())
 
-                Image(systemName: "network")
-                    .font(.system(size: 30, weight: .light))
-                    .foregroundColor(.accentColor)
+                Text(targetInput)
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .foregroundColor(.primary)
             }
 
-            VStack(spacing: 6) {
-                Text("Searching Passive Intel")
-                    .font(.headline)
-                Text("Querying crt.name, crt.sh, AlienVault, HackerTarget, Anubis & Wayback archives...")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 36)
+            // Stream Rows
+            VStack(spacing: 8) {
+                streamStatusRow(feed: "Certificate Transparency", sources: "crt.sh • crt.name")
+                streamStatusRow(feed: "Passive DNS & Threat Graph", sources: "AlienVault OTX")
+                streamStatusRow(feed: "Host & Infrastructure Search", sources: "HackerTarget • Anubis")
+                streamStatusRow(feed: "Historical Web Archive", sources: "Wayback CDX Server")
             }
+            .padding(.horizontal, 20)
+
+            ProgressView()
+                .controlSize(.regular)
+                .padding(.top, 8)
 
             Spacer()
         }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever()) {
+                pulseStream = true
+            }
+        }
     }
 
-    // MARK: - Empty State
+    private func streamStatusRow(feed: String, sources: String) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(feed)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text(sources)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
 
-    private var emptyStateHeroSection: some View {
+            Spacer()
+
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(Color.cyan)
+                    .frame(width: 5, height: 5)
+                    .opacity(pulseStream ? 1 : 0.2)
+                Text("DISPATCHED")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(.cyan)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.cyan.opacity(0.08))
+            .cornerRadius(4)
+        }
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(uiColor: .separator).opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Idle State
+
+    private var idleHeroSection: some View {
         VStack(spacing: 16) {
             Spacer()
             ZStack {
-                RoundedRectangle(cornerRadius: 24)
+                Circle()
                     .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                    .frame(width: 88, height: 88)
+                    .frame(width: 72, height: 72)
+                    .overlay(
+                        Circle().stroke(Color(uiColor: .separator).opacity(0.3), lineWidth: 1)
+                    )
 
-                Image(systemName: "globe.badge.chevron.backward")
-                    .font(.system(size: 38, weight: .light))
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 30, weight: .light))
                     .foregroundColor(.secondary)
             }
 
             VStack(spacing: 6) {
-                Text("Real-Time Domain Discovery")
-                    .font(.headline)
-                Text("Scan any apex domain to unearth all active and historical subdomains directly from your iPhone.")
-                    .font(.subheadline)
+                Text("Passive Reconnaissance")
+                    .font(.system(size: 17, weight: .semibold))
+                Text("Execute asynchronous queries across certificate transparency logs, DNS tables, and web archives without touching target infrastructure.")
+                    .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 36)
+                    .lineSpacing(3)
             }
             Spacer()
         }
@@ -379,39 +452,47 @@ struct ContentView: View {
 
     private func dashboardResultsSection(for record: ScanRecord) -> some View {
         VStack(spacing: 0) {
-            // Stats Row
-            HStack(spacing: 10) {
-                statPill(title: "Subdomains", value: "\(record.subdomains.count)", icon: "square.3.layers.3d", color: .cyan)
-                statPill(title: "Duration", value: String(format: "%.2fs", record.duration), icon: "stopwatch", color: .orange)
-                statPill(title: "Target", value: record.domain, icon: "shield", color: .indigo)
+            // Metrics Strip
+            HStack(spacing: 8) {
+                metricBox(title: "IDENTIFIERS", value: "\(record.subdomains.count)", color: .blue)
+                metricBox(title: "LATENCY", value: String(format: "%.2fs", record.duration), color: .orange)
+                metricBox(title: "APEX DOMAIN", value: record.domain, color: .purple)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            // Filtering & Controls
+            // Filtering Bar
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "line.3.horizontal.decrease")
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                    TextField("Filter results...", text: $filterQuery)
-                        .font(.subheadline)
+                    TextField("Filter identifiers...", text: $filterQuery)
+                        .font(.system(size: 13, design: .monospaced))
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+                .padding(.vertical, 7)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .cornerRadius(10)
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+                )
 
                 // Favorite Toggle
                 Button {
-                    haptic.impactOccurred()
+                    HapticEngine.shared.feedbackRigid()
                     onlyFavorites.toggle()
                 } label: {
                     Image(systemName: onlyFavorites ? "star.fill" : "star")
                         .foregroundColor(onlyFavorites ? .yellow : .secondary)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 34, height: 34)
                         .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .cornerRadius(10)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+                        )
                 }
 
                 // Sort Menu
@@ -421,12 +502,20 @@ struct ContentView: View {
                             Text(opt.rawValue).tag(opt)
                         }
                     }
+                    .onChange(of: sortOption) { _ in
+                        HapticEngine.shared.feedbackSelection()
+                    }
                 } label: {
-                    Image(systemName: "arrow.up.and.down.text.horizontal")
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 34, height: 34)
                         .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .cornerRadius(10)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+                        )
                 }
             }
             .padding(.horizontal)
@@ -436,11 +525,11 @@ struct ContentView: View {
             List {
                 Section {
                     ForEach(filteredResults, id: \.self) { (sub: String) in
-                        subdomainRowItem(sub)
+                        subdomainRow(sub)
                     }
                 } header: {
-                    Text("\(filteredResults.count) SUBDOMAINS")
-                        .font(.caption2.weight(.bold))
+                    Text("\(filteredResults.count) DISCOVERED ENDPOINTS")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
             }
@@ -448,51 +537,52 @@ struct ContentView: View {
         }
     }
 
-    private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.caption2)
-                    .foregroundColor(color)
-                Text(title.uppercased())
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary)
-            }
+    private func metricBox(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.secondary)
             Text(value)
-                .font(.system(.subheadline, design: .monospaced).weight(.bold))
+                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                .foregroundColor(.primary)
                 .lineLimit(1)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .cornerRadius(12)
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+        )
     }
 
-    private func subdomainRowItem(_ sub: String) -> some View {
+    private func subdomainRow(_ sub: String) -> some View {
         let isFav = store.favorites.contains(sub)
 
         return HStack(spacing: 8) {
             Text(sub)
-                .font(.system(size: 14, weight: .regular, design: .monospaced))
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
                 .foregroundColor(.primary)
                 .textSelection(.enabled)
 
             Spacer()
 
             Button {
+                HapticEngine.shared.feedbackRigid()
                 store.toggleFavorite(sub)
-                haptic.impactOccurred()
             } label: {
                 Image(systemName: isFav ? "star.fill" : "star")
-                    .foregroundColor(isFav ? .yellow : Color.secondary.opacity(0.3))
+                    .font(.system(size: 13))
+                    .foregroundColor(isFav ? .yellow : Color.secondary.opacity(0.25))
             }
             .buttonStyle(.plain)
 
             Button {
-                copyText(sub)
+                copySingle(sub)
             } label: {
                 Image(systemName: "doc.on.doc")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
@@ -500,18 +590,48 @@ struct ContentView: View {
         .padding(.vertical, 2)
         .swipeActions(edge: .trailing) {
             Button {
-                copyText(sub)
+                copySingle(sub)
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
-            .tint(.cyan)
+            .tint(.blue)
 
             Button {
+                HapticEngine.shared.feedbackRigid()
                 store.toggleFavorite(sub)
             } label: {
                 Label(isFav ? "Unstar" : "Star", systemImage: isFav ? "star.slash" : "star.fill")
             }
             .tint(.yellow)
+        }
+    }
+
+    // MARK: - Animated Snackbar Component
+
+    private func snackbarOverlay(message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: snackbarIcon)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.cyan)
+
+            Text(message)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThickMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.cyan.opacity(0.3), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .onTapGesture {
+            withAnimation { self.snackbarText = nil }
         }
     }
 
@@ -522,44 +642,47 @@ struct ContentView: View {
             List {
                 if store.history.isEmpty {
                     ContentUnavailableView(
-                        "No Previous Scans",
-                        systemImage: "clock",
-                        description: Text("Scanned domains will be saved here automatically.")
+                        "No Recon Records",
+                        systemImage: "folder.badge.gearshape",
+                        description: Text("All gathered targets are preserved locally.")
                     )
                 } else {
                     ForEach(store.history, id: \.id) { (rec: ScanRecord) in
                         Button {
+                            HapticEngine.shared.feedbackSelection()
                             store.activeRecord = rec
                             targetInput = rec.domain
                             showHistorySheet = false
                         } label: {
                             HStack {
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 3) {
                                     Text(rec.domain)
-                                        .font(.headline)
+                                        .font(.system(size: 15, weight: .bold, design: .monospaced))
                                         .foregroundColor(.primary)
-                                    Text("\(rec.subdomains.count) subdomains • \(rec.timestamp.formatted(date: .abbreviated, time: .shortened))")
-                                        .font(.caption)
+                                    Text("\(rec.subdomains.count) records • \(rec.timestamp.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.system(size: 12))
                                         .foregroundColor(.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
-                                    .font(.caption2)
+                                    .font(.system(size: 11, weight: .semibold))
                                     .foregroundColor(.secondary)
                             }
                         }
                     }
                     .onDelete { offsets in
+                        HapticEngine.shared.feedbackHeavy()
                         store.deleteRecord(at: offsets)
                     }
                 }
             }
-            .navigationTitle("Scan History")
+            .navigationTitle("Recon History")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !store.history.isEmpty {
                         Button(role: .destructive) {
+                            HapticEngine.shared.feedbackHeavy()
                             store.clearHistory()
                         } label: {
                             Text("Clear")
@@ -580,39 +703,42 @@ struct ContentView: View {
     private var exportSheet: some View {
         NavigationStack {
             List {
-                Section("Choose File Format") {
+                Section("Format Selection") {
                     ForEach(ExportType.allCases, id: \.id) { (format: ExportType) in
                         Button {
+                            HapticEngine.shared.feedbackMedium()
                             exportData(format)
                         } label: {
                             HStack {
                                 Text(format.rawValue)
+                                    .font(.system(size: 14, weight: .medium))
                                     .foregroundColor(.primary)
                                 Spacer()
-                                Image(systemName: "square.and.arrow.up")
+                                Image(systemName: "arrow.up.doc")
+                                    .font(.system(size: 13))
                                     .foregroundColor(.accentColor)
                             }
                         }
                     }
                 }
             }
-            .navigationTitle("Export Data")
+            .navigationTitle("Export Telemetry")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Close") { showExportSheet = false }
+                    Button("Dismiss") { showExportSheet = false }
                 }
             }
         }
     }
 
-    // MARK: - Actions
+    // MARK: - Business Logic
 
-    private func performScan(_ domain: String) {
+    private func executeDiscovery(_ domain: String) {
         let clean = domain.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
 
-        haptic.impactOccurred()
+        HapticEngine.shared.feedbackMedium()
         store.isScanning = true
 
         Task {
@@ -628,22 +754,23 @@ struct ContentView: View {
                 self.store.activeRecord = newRecord
                 self.store.isScanning = false
                 self.store.recordScan(newRecord)
-                triggerToast("Found \(res.subdomains.count) subdomains")
+                HapticEngine.shared.feedbackSuccess()
+                triggerSnackbar("Discovered \(res.subdomains.count) endpoints in \(String(format: "%.2f", res.duration))s")
             }
         }
     }
 
-    private func copyText(_ text: String) {
+    private func copySingle(_ text: String) {
         UIPasteboard.general.string = text
-        haptic.impactOccurred()
-        triggerToast("Copied: \(text)")
+        HapticEngine.shared.feedbackLight()
+        triggerSnackbar("Copied: \(text)")
     }
 
     private func copyAll() {
         guard let subs = store.activeRecord?.subdomains, !subs.isEmpty else { return }
         UIPasteboard.general.string = subs.joined(separator: "\n")
-        haptic.impactOccurred()
-        triggerToast("Copied \(subs.count) subdomains")
+        HapticEngine.shared.feedbackLight()
+        triggerSnackbar("Copied \(subs.count) endpoints")
     }
 
     private func exportData(_ type: ExportType) {
@@ -663,14 +790,20 @@ struct ContentView: View {
 
         UIPasteboard.general.string = result
         showExportSheet = false
-        triggerToast("Exported as \(type.rawValue)")
+        triggerSnackbar("Exported as \(type.rawValue)")
     }
 
-    private func triggerToast(_ message: String) {
-        toastText = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            if self.toastText == message {
-                self.toastText = nil
+    private func triggerSnackbar(_ message: String, icon: String = "checkmark.circle.fill") {
+        self.snackbarIcon = icon
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            self.snackbarText = message
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            if self.snackbarText == message {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.snackbarText = nil
+                }
             }
         }
     }
