@@ -2,7 +2,8 @@ name: DomainScanner
 options:
   bundleIdPrefix: com.scanner
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "17.0"
+  xcodeVersion: "15.4"
 targets:
   DomainScanner:
     type: application
