@@ -1,7 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Models
+// MARK: - Data Models
 
 struct ScanRecord: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
@@ -11,84 +11,119 @@ struct ScanRecord: Identifiable, Codable, Equatable {
     let subdomains: [String]
 }
 
-enum SortOrder: String, CaseIterable, Identifiable {
-    case alphabeticalAsc = "A to Z"
-    case alphabeticalDesc = "Z to A"
-    case lengthAsc = "Shortest First"
-    case lengthDesc = "Longest First"
+enum SortOption: String, CaseIterable, Identifiable {
+    case nameAsc = "A → Z"
+    case nameDesc = "Z → A"
+    case lenAsc = "Shortest"
+    case lenDesc = "Longest"
 
     var id: String { rawValue }
 }
 
-enum ExportFormat: String, CaseIterable {
+enum ExportType: String, CaseIterable, Identifiable {
     case txt = "Plain Text (.txt)"
-    case json = "JSON (.json)"
-    case csv = "CSV (.csv)"
+    case json = "JSON Array (.json)"
+    case csv = "CSV Spreadsheet (.csv)"
+
+    var id: String { rawValue }
 }
 
-// MARK: - Main View
+// MARK: - State Store (Thread-Safe Persistence)
+
+@MainActor
+final class AppStore: ObservableObject {
+    @Published var history: [ScanRecord] = []
+    @Published var favorites: Set<String> = []
+    @Published var activeRecord: ScanRecord?
+    @Published var isScanning: Bool = false
+
+    private let historyKey = "domain_scanner_history_v3"
+    private let favoritesKey = "domain_scanner_favorites_v3"
+
+    init() {
+        loadStorage()
+    }
+
+    func loadStorage() {
+        if let data = UserDefaults.standard.data(forKey: historyKey),
+           let records = try? JSONDecoder().decode([ScanRecord].self, from: data) {
+            self.history = records
+        }
+        if let favList = UserDefaults.standard.stringArray(forKey: favoritesKey) {
+            self.favorites = Set(favList)
+        }
+    }
+
+    func recordScan(_ record: ScanRecord) {
+        history.removeAll { $0.domain.lowercased() == record.domain.lowercased() }
+        history.insert(record, at: 0)
+        if history.count > 50 { history = Array(history.prefix(50)) }
+        persistHistory()
+    }
+
+    func deleteRecord(at offsets: IndexSet) {
+        history.remove(atOffsets: offsets)
+        persistHistory()
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        UserDefaults.standard.removeObject(forKey: historyKey)
+    }
+
+    func toggleFavorite(_ subdomain: String) {
+        if favorites.contains(subdomain) {
+            favorites.remove(subdomain)
+        } else {
+            favorites.insert(subdomain)
+        }
+        UserDefaults.standard.set(Array(favorites), forKey: favoritesKey)
+    }
+
+    private func persistHistory() {
+        if let data = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(data, forKey: historyKey)
+        }
+    }
+}
+
+// MARK: - Main User Interface
 
 struct ContentView: View {
-    @State private var targetDomain: String = ""
-    @State private var searchQuery: String = ""
-    @State private var isScanning: Bool = false
-    @State private var activeRecord: ScanRecord?
-    @State private var sortOrder: SortOrder = .alphabeticalAsc
-    @State private var showOnlyFavorites: Bool = false
+    @StateObject private var store = AppStore()
+    private let engine = ScannerEngine()
+    private let haptic = UIImpactFeedbackGenerator(style: .medium)
+
+    @State private var targetInput: String = ""
+    @State private var filterQuery: String = ""
+    @State private var sortOption: SortOption = .nameAsc
+    @State private var onlyFavorites: Bool = false
     @State private var showHistorySheet: Bool = false
     @State private var showExportSheet: Bool = false
-    @State private var toastMessage: String?
-    @State private var isSearchFocused: Bool = false
+    @State private var toastText: String?
 
-    @AppStorage("scan_records_json") private var scanRecordsRaw: String = "[]"
-    @AppStorage("favorite_subdomains") private var favoritesRaw: String = "[]"
+    // MARK: - Computed Filter & Sort
 
-    private let engine = ScannerEngine()
-    private let hapticFeedback = UIImpactFeedbackGenerator(style: .medium)
-
-    // MARK: - Computed Properties
-
-    private var historyRecords: [ScanRecord] {
-        get { (try? JSONDecoder().decode([ScanRecord].self, from: Data(scanRecordsRaw.utf8))) ?? [] }
-        set {
-            if let data = try? JSONEncoder().encode(newValue) {
-                scanRecordsRaw = String(data: data, encoding: .utf8) ?? "[]"
-            }
-        }
-    }
-
-    private var favoriteSubdomains: Set<String> {
-        get {
-            let list = (try? JSONDecoder().decode([String].self, from: Data(favoritesRaw.utf8))) ?? []
-            return Set(list)
-        }
-        set {
-            if let data = try? JSONEncoder().encode(Array(newValue)) {
-                favoritesRaw = String(data: data, encoding: .utf8) ?? "[]"
-            }
-        }
-    }
-
-    private var displayedSubdomains: [String] {
-        guard let record = activeRecord else { return [] }
+    private var filteredResults: [String] {
+        guard let record = store.activeRecord else { return [] }
         var list = record.subdomains
 
-        if showOnlyFavorites {
-            list = list.filter { favoriteSubdomains.contains($0) }
+        if onlyFavorites {
+            list = list.filter { store.favorites.contains($0) }
         }
 
-        if !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
-            list = list.filter { $0.localizedCaseInsensitiveContains(searchQuery) }
+        if !filterQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+            list = list.filter { $0.localizedCaseInsensitiveContains(filterQuery) }
         }
 
-        switch sortOrder {
-        case .alphabeticalAsc:
+        switch sortOption {
+        case .nameAsc:
             list.sort()
-        case .alphabeticalDesc:
+        case .nameDesc:
             list.sort(by: >)
-        case .lengthAsc:
+        case .lenAsc:
             list.sort { $0.count < $1.count }
-        case .lengthDesc:
+        case .lenDesc:
             list.sort { $0.count > $1.count }
         }
 
@@ -104,103 +139,104 @@ struct ContentView: View {
                     .ignoresSafeArea()
 
                 VStack(spacing: 0) {
-                    searchHeaderView
-                    
-                    if isScanning {
-                        scanningAnimationView
+                    searchHeaderSection
+
+                    if store.isScanning {
+                        radarScannerSection
                             .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                    } else if let record = activeRecord {
-                        resultsDashboardView(for: record)
+                    } else if let record = store.activeRecord {
+                        dashboardResultsSection(for: record)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     } else {
-                        emptyStateView
+                        emptyStateHeroSection
                             .transition(.opacity)
                     }
                 }
 
-                // Floating Toast Notification
-                if let msg = toastMessage {
+                // Toast Notification Overlay
+                if let msg = toastText {
                     VStack {
                         Spacer()
                         HStack(spacing: 8) {
                             Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
+                                .foregroundColor(.cyan)
                             Text(msg)
-                                .font(.subheadline.weight(.semibold))
+                                .font(.subheadline.weight(.medium))
                         }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 10)
                         .background(.ultraThickMaterial)
                         .clipShape(Capsule())
-                        .shadow(color: .black.opacity(0.12), radius: 10, y: 5)
+                        .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
                         .padding(.bottom, 24)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isScanning)
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: activeRecord)
-            .animation(.easeInOut(duration: 0.2), value: toastMessage)
-            .navigationTitle("Recon")
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.isScanning)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.activeRecord)
+            .animation(.easeInOut(duration: 0.2), value: toastText)
+            .navigationTitle("Recon OSINT")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
+                        haptic.impactOccurred()
                         showHistorySheet = true
                     } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 16, weight: .semibold))
+                        Image(systemName: "clock.arrow.2.circlepath")
+                            .font(.system(size: 15, weight: .semibold))
                     }
                 }
 
-                if activeRecord != nil {
+                if store.activeRecord != nil {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button {
                                 showExportSheet = true
                             } label: {
-                                Label("Export Options", systemImage: "square.and.arrow.up")
+                                Label("Export Data", systemImage: "square.and.arrow.up")
                             }
 
                             Button {
-                                copyAllToClipboard()
+                                copyAll()
                             } label: {
                                 Label("Copy All Subdomains", systemImage: "doc.on.doc")
                             }
                         } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.system(size: 16, weight: .semibold))
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 15, weight: .semibold))
                         }
                     }
                 }
             }
             .sheet(isPresented: $showHistorySheet) {
-                historySheetView
+                historySheet
             }
             .sheet(isPresented: $showExportSheet) {
-                exportSheetView
+                exportSheet
             }
         }
     }
 
-    // MARK: - Views
+    // MARK: - Search Header
 
-    private var searchHeaderView: some View {
-        VStack(spacing: 10) {
+    private var searchHeaderSection: some View {
+        VStack(spacing: 8) {
             HStack(spacing: 10) {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    
-                    TextField("Enter target (e.g. github.com)", text: $targetDomain)
+
+                    TextField("Target apex (e.g. stripe.com)", text: $targetInput)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .submitLabel(.search)
-                        .onSubmit { startScan(targetDomain) }
+                        .onSubmit { performScan(targetInput) }
 
-                    if !targetDomain.isEmpty {
+                    if !targetInput.isEmpty {
                         Button {
-                            targetDomain = ""
+                            targetInput = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
@@ -213,131 +249,189 @@ struct ContentView: View {
                 .cornerRadius(12)
 
                 Button {
-                    startScan(targetDomain)
+                    performScan(targetInput)
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(targetDomain.isEmpty || isScanning ? Color.secondary.opacity(0.4) : Color.accentColor)
+                    ZStack {
+                        Circle()
+                            .fill(targetInput.isEmpty || store.isScanning ? Color.secondary.opacity(0.2) : Color.accentColor)
+                            .frame(width: 42, height: 42)
+
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundColor(.white)
+                    }
                 }
-                .disabled(targetDomain.isEmpty || isScanning)
+                .disabled(targetInput.isEmpty || store.isScanning)
             }
             .padding(.horizontal)
-            .padding(.top, 8)
+            .padding(.top, 6)
+
+            // History Quick Chips
+            if !store.history.isEmpty && store.activeRecord == nil {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(store.history.prefix(6)) { item in
+                            Button {
+                                targetInput = item.domain
+                                performScan(item.domain)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.counterclockwise")
+                                        .font(.system(size: 10))
+                                    Text(item.domain)
+                                        .font(.caption.weight(.medium))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                .foregroundColor(.primary)
+                                .cornerRadius(8)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.bottom, 4)
+            }
         }
     }
 
-    private var scanningAnimationView: some View {
-        VStack(spacing: 20) {
+    // MARK: - Scanning Radar Animation
+
+    private var radarScannerSection: some View {
+        VStack(spacing: 24) {
             Spacer()
+
             ZStack {
                 Circle()
-                    .stroke(Color.accentColor.opacity(0.15), lineWidth: 6)
-                    .frame(width: 80, height: 80)
+                    .stroke(Color.accentColor.opacity(0.12), lineWidth: 40)
+                    .frame(width: 130, height: 130)
 
                 Circle()
-                    .trim(from: 0, to: 0.7)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                    .frame(width: 80, height: 80)
-                    .rotationEffect(.degrees(isScanning ? 360 : 0))
-                    .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: isScanning)
+                    .trim(from: 0, to: 0.65)
+                    .stroke(
+                        AngularGradient(
+                            colors: [.accentColor.opacity(0.1), .accentColor],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                    )
+                    .frame(width: 100, height: 100)
+                    .rotationEffect(.degrees(store.isScanning ? 360 : 0))
+                    .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: store.isScanning)
+
+                Image(systemName: "network")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundColor(.accentColor)
             }
 
             VStack(spacing: 6) {
-                Text("Querying Threat Databases")
+                Text("Searching Passive Intel")
                     .font(.headline)
-                Text("Scanning CT logs, passive DNS and historical web archives...")
+                Text("Querying crt.name, crt.sh, AlienVault, HackerTarget, Anubis & Wayback archives...")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
+                    .padding(.horizontal, 36)
             }
+
             Spacer()
         }
     }
 
-    private var emptyStateView: some View {
+    // MARK: - Empty State
+
+    private var emptyStateHeroSection: some View {
         VStack(spacing: 16) {
             Spacer()
-            Image(systemName: "globe.americas.fill")
-                .font(.system(size: 54))
-                .foregroundStyle(.tertiary)
+            ZStack {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                    .frame(width: 88, height: 88)
 
-            VStack(spacing: 4) {
-                Text("Ready to Discover")
+                Image(systemName: "globe.badge.chevron.backward")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundColor(.secondary)
+            }
+
+            VStack(spacing: 6) {
+                Text("Real-Time Domain Discovery")
                     .font(.headline)
-                Text("Enter an apex domain above to scan subdomains across 6+ passive sources simultaneously.")
+                Text("Scan any apex domain to unearth all active and historical subdomains directly from your iPhone.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
+                    .padding(.horizontal, 36)
             }
             Spacer()
         }
     }
 
-    private func resultsDashboardView(for record: ScanRecord) -> some View {
+    // MARK: - Results Dashboard
+
+    private func dashboardResultsSection(for record: ScanRecord) -> some View {
         VStack(spacing: 0) {
-            // Stats summary card
-            HStack(spacing: 12) {
-                statCard(title: "Found", value: "\(record.subdomains.count)", icon: "square.stack.3d.up.fill", color: .blue)
-                statCard(title: "Duration", value: String(format: "%.2fs", record.duration), icon: "timer", color: .orange)
-                statCard(title: "Apex", value: record.domain, icon: "network", color: .purple)
+            // Stats Row
+            HStack(spacing: 10) {
+                statPill(title: "Subdomains", value: "\(record.subdomains.count)", icon: "square.3.layers.3d", color: .cyan)
+                statPill(title: "Duration", value: String(format: "%.2fs", record.duration), icon: "stopwatch", color: .orange)
+                statPill(title: "Target", value: record.domain, icon: "shield", color: .indigo)
             }
             .padding(.horizontal)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
 
-            // Filtering & Sorting Bar
-            HStack(spacing: 10) {
-                HStack {
+            // Filtering & Controls
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Image(systemName: "line.3.horizontal.decrease")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    TextField("Filter results...", text: $searchQuery)
+                    TextField("Filter results...", text: $filterQuery)
                         .font(.subheadline)
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                .padding(.vertical, 8)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .cornerRadius(8)
+                .cornerRadius(10)
 
-                // Favorite toggle
+                // Favorite Toggle
                 Button {
-                    hapticFeedback.impactOccurred()
-                    showOnlyFavorites.toggle()
+                    haptic.impactOccurred()
+                    onlyFavorites.toggle()
                 } label: {
-                    Image(systemName: showOnlyFavorites ? "star.fill" : "star")
-                        .foregroundColor(showOnlyFavorites ? .yellow : .secondary)
-                        .padding(8)
+                    Image(systemName: onlyFavorites ? "star.fill" : "star")
+                        .foregroundColor(onlyFavorites ? .yellow : .secondary)
+                        .frame(width: 36, height: 36)
                         .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .cornerRadius(8)
+                        .cornerRadius(10)
                 }
 
                 // Sort Menu
                 Menu {
-                    Picker("Sort By", selection: $sortOrder) {
-                        ForEach(SortOrder.allCases) { order in
-                            Text(order.rawValue).tag(order)
+                    Picker("Sort", selection: $sortOption) {
+                        ForEach(SortOption.allCases) { opt in
+                            Text(opt.rawValue).tag(opt)
                         }
                     }
                 } label: {
-                    Image(systemName: "arrow.up.arrow.down")
+                    Image(systemName: "arrow.up.and.down.text.horizontal")
                         .foregroundColor(.secondary)
-                        .padding(8)
+                        .frame(width: 36, height: 36)
                         .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .cornerRadius(8)
+                        .cornerRadius(10)
                 }
             }
             .padding(.horizontal)
-            .padding(.bottom, 8)
+            .padding(.bottom, 6)
 
-            // List of subdomains
+            // Results List
             List {
                 Section {
-                    ForEach(displayedSubdomains, id: \.self) { sub in
-                        subdomainRow(sub)
+                    ForEach(filteredResults, id: \.self) { sub in
+                        subdomainRowItem(sub)
                     }
                 } header: {
-                    Text("\(displayedSubdomains.count) SUBDOMAINS")
+                    Text("\(filteredResults.count) SUBDOMAINS")
                         .font(.caption2.weight(.bold))
                         .foregroundColor(.secondary)
                 }
@@ -346,52 +440,51 @@ struct ContentView: View {
         }
     }
 
-    private func statCard(title: String, value: String, icon: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
+    private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundColor(color)
-                Spacer()
+                Text(title.uppercased())
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
             }
             Text(value)
-                .font(.system(.body, design: .rounded).weight(.bold))
+                .font(.system(.subheadline, design: .monospaced).weight(.bold))
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Text(title)
-                .font(.caption2)
-                .foregroundColor(.secondary)
         }
         .padding(10)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
         .cornerRadius(12)
     }
 
-    private func subdomainRow(_ sub: String) -> some View {
-        let isFav = favoriteSubdomains.contains(sub)
+    private func subdomainRowItem(_ sub: String) -> some View {
+        let isFav = store.favorites.contains(sub)
 
-        return HStack {
+        return HStack(spacing: 8) {
             Text(sub)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: 14, weight: .regular, design: .monospaced))
                 .foregroundColor(.primary)
                 .textSelection(.enabled)
 
             Spacer()
 
             Button {
-                toggleFavorite(sub)
+                store.toggleFavorite(sub)
+                haptic.impactOccurred()
             } label: {
                 Image(systemName: isFav ? "star.fill" : "star")
-                    .foregroundColor(isFav ? .yellow : Color.secondary.opacity(0.4))
+                    .foregroundColor(isFav ? .yellow : Color.secondary.opacity(0.3))
             }
             .buttonStyle(.plain)
 
             Button {
-                copySingle(sub)
+                copyText(sub)
             } label: {
                 Image(systemName: "doc.on.doc")
-                    .font(.footnote)
+                    .font(.caption)
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
@@ -399,14 +492,14 @@ struct ContentView: View {
         .padding(.vertical, 2)
         .swipeActions(edge: .trailing) {
             Button {
-                copySingle(sub)
+                copyText(sub)
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
-            .tint(.blue)
+            .tint(.cyan)
 
             Button {
-                toggleFavorite(sub)
+                store.toggleFavorite(sub)
             } label: {
                 Label(isFav ? "Unstar" : "Star", systemImage: isFav ? "star.slash" : "star.fill")
             }
@@ -416,46 +509,52 @@ struct ContentView: View {
 
     // MARK: - History Sheet
 
-    private var historySheetView: some View {
+    private var historySheet: some View {
         NavigationStack {
             List {
-                if historyRecords.isEmpty {
-                    ContentUnavailableView("No Scan History", systemImage: "clock", description: Text("Your past reconnaissance runs will appear here."))
+                if store.history.isEmpty {
+                    ContentUnavailableView(
+                        "No Previous Scans",
+                        systemImage: "clock",
+                        description: Text("Scanned domains will be saved here automatically.")
+                    )
                 } else {
-                    ForEach(historyRecords) { rec in
+                    ForEach(store.history) { rec in
                         Button {
-                            activeRecord = rec
-                            targetDomain = rec.domain
+                            store.activeRecord = rec
+                            targetInput = rec.domain
                             showHistorySheet = false
                         } label: {
                             HStack {
-                                VStack(alignment: .leading, spacing: 3) {
+                                VStack(alignment: .leading, spacing: 4) {
                                     Text(rec.domain)
                                         .font(.headline)
                                         .foregroundColor(.primary)
-                                    Text("\(rec.subdomains.count) subdomains found • \(rec.timestamp.formatted(date: .abbreviated, time: .shortened))")
+                                    Text("\(rec.subdomains.count) subdomains • \(rec.timestamp.formatted(date: .abbreviated, time: .shortened))")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
-                                    .font(.caption)
+                                    .font(.caption2)
                                     .foregroundColor(.tertiaryLabel)
                             }
                         }
                     }
-                    .onDelete(perform: deleteHistoryItem)
+                    .onDelete { offsets in
+                        store.deleteRecord(at: offsets)
+                    }
                 }
             }
             .navigationTitle("Scan History")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if !historyRecords.isEmpty {
+                    if !store.history.isEmpty {
                         Button(role: .destructive) {
-                            historyRecords.removeAll()
+                            store.clearHistory()
                         } label: {
-                            Text("Clear All")
+                            Text("Clear")
                         }
                     }
                 }
@@ -470,13 +569,13 @@ struct ContentView: View {
 
     // MARK: - Export Sheet
 
-    private var exportSheetView: some View {
+    private var exportSheet: some View {
         NavigationStack {
             List {
-                Section("Choose Format") {
-                    ForEach(ExportFormat.allCases, id: \.self) { format in
+                Section("Choose File Format") {
+                    ForEach(ExportType.allCases) { format in
                         Button {
-                            exportFormattedData(format)
+                            exportData(format)
                         } label: {
                             HStack {
                                 Text(format.rawValue)
@@ -489,7 +588,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("Export Subdomains")
+            .navigationTitle("Export Data")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -499,14 +598,14 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Logic & Actions
+    // MARK: - Actions
 
-    private func startScan(_ domain: String) {
+    private func performScan(_ domain: String) {
         let clean = domain.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
 
-        hapticFeedback.impactOccurred()
-        isScanning = true
+        haptic.impactOccurred()
+        store.isScanning = true
 
         Task {
             let res = await engine.scan(apex: clean)
@@ -518,74 +617,52 @@ struct ContentView: View {
             )
 
             await MainActor.run {
-                self.activeRecord = newRecord
-                self.isScanning = false
-                saveToHistory(newRecord)
-                showToast("Found \(res.subdomains.count) subdomains")
+                self.store.activeRecord = newRecord
+                self.store.isScanning = false
+                self.store.recordScan(newRecord)
+                triggerToast("Found \(res.subdomains.count) subdomains")
             }
         }
     }
 
-    private func saveToHistory(_ record: ScanRecord) {
-        var list = historyRecords.filter { $0.domain != record.domain }
-        list.insert(record, at: 0)
-        if list.count > 25 { list = Array(list.prefix(25)) }
-        historyRecords = list
-    }
-
-    private func deleteHistoryItem(at offsets: IndexSet) {
-        historyRecords.remove(atOffsets: offsets)
-    }
-
-    private func toggleFavorite(_ sub: String) {
-        hapticFeedback.impactOccurred()
-        var favs = favoriteSubdomains
-        if favs.contains(sub) {
-            favs.remove(sub)
-        } else {
-            favs.insert(sub)
-        }
-        favoriteSubdomains = favs
-    }
-
-    private func copySingle(_ text: String) {
+    private func copyText(_ text: String) {
         UIPasteboard.general.string = text
-        hapticFeedback.impactOccurred()
-        showToast("Copied: \(text)")
+        haptic.impactOccurred()
+        triggerToast("Copied: \(text)")
     }
 
-    private func copyAllToClipboard() {
-        guard let list = activeRecord?.subdomains, !list.isEmpty else { return }
-        UIPasteboard.general.string = list.joined(separator: "\n")
-        hapticFeedback.impactOccurred()
-        showToast("Copied \(list.count) subdomains")
+    private func copyAll() {
+        guard let subs = store.activeRecord?.subdomains, !subs.isEmpty else { return }
+        UIPasteboard.general.string = subs.joined(separator: "\n")
+        haptic.impactOccurred()
+        triggerToast("Copied \(subs.count) subdomains")
     }
 
-    private func exportFormattedData(_ format: ExportFormat) {
-        guard let record = activeRecord else { return }
-        var output = ""
+    private func exportData(_ type: ExportType) {
+        guard let subs = store.activeRecord?.subdomains else { return }
+        var result = ""
 
-        switch format {
+        switch type {
         case .txt:
-            output = record.subdomains.joined(separator: "\n")
+            result = subs.joined(separator: "\n")
         case .json:
-            if let data = try? JSONEncoder().encode(record.subdomains), let str = String(data: data, encoding: .utf8) {
-                output = str
+            if let data = try? JSONEncoder().encode(subs), let str = String(data: data, encoding: .utf8) {
+                result = str
             }
         case .csv:
-            output = "Subdomain\n" + record.subdomains.joined(separator: "\n")
+            result = "Subdomain\n" + subs.joined(separator: "\n")
         }
 
-        UIPasteboard.general.string = output
+        UIPasteboard.general.string = result
         showExportSheet = false
-        showToast("Exported to clipboard as \(format.rawValue)")
+        triggerToast("Exported as \(type.rawValue)")
     }
 
-    private func showToast(_ msg: String) {
-        toastMessage = msg
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
-            if self.toastMessage == msg {
-                self.toastMessage = nil
+    private func triggerToast(_ message: String) {
+        toastText = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            if self.toastText == message {
+                self.toastText = nil
             }
         }
     }
