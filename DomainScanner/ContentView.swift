@@ -4,11 +4,19 @@ import UniformTypeIdentifiers
 // MARK: - Data Models
 
 struct ScanRecord: Identifiable, Codable, Equatable {
-    var id: UUID = UUID()
+    let id: UUID
     let domain: String
     let timestamp: Date
     let duration: TimeInterval
     let subdomains: [String]
+
+    init(id: UUID = UUID(), domain: String, timestamp: Date, duration: TimeInterval, subdomains: [String]) {
+        self.id = id
+        self.domain = domain
+        self.timestamp = timestamp
+        self.duration = duration
+        self.subdomains = subdomains
+    }
 }
 
 enum SortOption: String, CaseIterable, Identifiable {
@@ -28,7 +36,7 @@ enum ExportType: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-// MARK: - State Store (Thread-Safe Persistence)
+// MARK: - State Store
 
 @MainActor
 final class AppStore: ObservableObject {
@@ -37,8 +45,8 @@ final class AppStore: ObservableObject {
     @Published var activeRecord: ScanRecord?
     @Published var isScanning: Bool = false
 
-    private let historyKey = "domain_scanner_history_v3"
-    private let favoritesKey = "domain_scanner_favorites_v3"
+    private let historyKey = "domain_scanner_history_v4"
+    private let favoritesKey = "domain_scanner_favorites_v4"
 
     init() {
         loadStorage()
@@ -87,7 +95,7 @@ final class AppStore: ObservableObject {
     }
 }
 
-// MARK: - Main User Interface
+// MARK: - Main View
 
 struct ContentView: View {
     @StateObject private var store = AppStore()
@@ -153,7 +161,7 @@ struct ContentView: View {
                     }
                 }
 
-                // Toast Notification Overlay
+                // Toast Notification
                 if let msg = toastText {
                     VStack {
                         Spacer()
@@ -270,7 +278,7 @@ struct ContentView: View {
             if !store.history.isEmpty && store.activeRecord == nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(store.history.prefix(6)) { item in
+                        ForEach(Array(store.history.prefix(6)), id: \.id) { (item: ScanRecord) in
                             Button {
                                 targetInput = item.domain
                                 performScan(item.domain)
@@ -409,7 +417,7 @@ struct ContentView: View {
                 // Sort Menu
                 Menu {
                     Picker("Sort", selection: $sortOption) {
-                        ForEach(SortOption.allCases) { opt in
+                        ForEach(SortOption.allCases) { (opt: SortOption) in
                             Text(opt.rawValue).tag(opt)
                         }
                     }
@@ -427,7 +435,7 @@ struct ContentView: View {
             // Results List
             List {
                 Section {
-                    ForEach(filteredResults, id: \.self) { sub in
+                    ForEach(filteredResults, id: \.self) { (sub: String) in
                         subdomainRowItem(sub)
                     }
                 } header: {
@@ -519,7 +527,7 @@ struct ContentView: View {
                         description: Text("Scanned domains will be saved here automatically.")
                     )
                 } else {
-                    ForEach(store.history) { rec in
+                    ForEach(store.history, id: \.id) { (rec: ScanRecord) in
                         Button {
                             store.activeRecord = rec
                             targetInput = rec.domain
@@ -537,7 +545,7 @@ struct ContentView: View {
                                 Spacer()
                                 Image(systemName: "chevron.right")
                                     .font(.caption2)
-                                    .foregroundColor(.tertiaryLabel)
+                                    .foregroundColor(.secondary)
                             }
                         }
                     }
@@ -573,7 +581,7 @@ struct ContentView: View {
         NavigationStack {
             List {
                 Section("Choose File Format") {
-                    ForEach(ExportType.allCases) { format in
+                    ForEach(ExportType.allCases, id: \.id) { (format: ExportType) in
                         Button {
                             exportData(format)
                         } label: {
