@@ -24,11 +24,8 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode Project & Fix Format
-        run: |
-          xcodegen generate
-          # Pakotetaan tiedostomuoto yhteensopivaksi kaikkien Xcode-versioiden kanssa
-          sed -i '' 's/objectVersion = [0-9]*/objectVersion = 60;/g' DomainScanner.xcodeproj/project.pbxproj
+      - name: Generate Xcode Project
+        run: xcodegen generate
 
       - name: Build App (.app)
         run: |
