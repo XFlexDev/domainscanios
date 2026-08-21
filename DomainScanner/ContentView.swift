@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 // MARK: - Data Models
 
@@ -36,6 +37,42 @@ enum ExportType: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+// MARK: - Local Notification Manager
+
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotificationManager()
+
+    private override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func requestAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    func dispatchCompletionNotification(domain: String, count: Int, duration: TimeInterval) {
+        let content = UNMutableNotificationContent()
+        content.title = "Reconnaissance Complete"
+        content.subtitle = domain
+        content.body = "Discovered \(count) active endpoints in \(String(format: "%.2f", duration))s."
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.2, repeats: false)
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    // Näytä banneri vaikka sovellus olisi etualalla
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .badge])
+    }
+}
+
 // MARK: - Haptic Engine
 
 final class HapticEngine {
@@ -66,8 +103,8 @@ final class AppStore: ObservableObject {
     @Published var activeRecord: ScanRecord?
     @Published var isScanning: Bool = false
 
-    private let historyKey = "recon_history_v5"
-    private let favoritesKey = "recon_favorites_v5"
+    private let historyKey = "recon_history_v6"
+    private let favoritesKey = "recon_favorites_v6"
 
     init() {
         loadStorage()
@@ -295,7 +332,7 @@ struct ContentView: View {
             .padding(.horizontal)
             .padding(.top, 8)
 
-            // Quick History Bar
+            // Quick History Chips
             if !store.history.isEmpty && store.activeRecord == nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -330,21 +367,20 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Redesigned Live Telemetry Pipeline (Scanning State)
+    // MARK: - Live Telemetry Pipeline (Scanning State)
 
     private var telemetryPipelineView: some View {
         VStack(spacing: 24) {
             Spacer()
 
             VStack(spacing: 12) {
-                // Target Pill
                 HStack(spacing: 6) {
                     Circle()
                         .fill(Color.blue)
                         .frame(width: 8, height: 8)
                         .opacity(pulseStream ? 1.0 : 0.3)
 
-                    Text("QUERYING OSINT STREAMS")
+                    Text("BACKGROUND THREAD ACTIVE")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundColor(.blue)
                 }
@@ -358,7 +394,6 @@ struct ContentView: View {
                     .foregroundColor(.primary)
             }
 
-            // Stream Rows
             VStack(spacing: 8) {
                 streamStatusRow(feed: "Certificate Transparency", sources: "crt.sh • crt.name")
                 streamStatusRow(feed: "Passive DNS & Threat Graph", sources: "AlienVault OTX")
@@ -437,7 +472,7 @@ struct ContentView: View {
             VStack(spacing: 6) {
                 Text("Passive Reconnaissance")
                     .font(.system(size: 17, weight: .semibold))
-                Text("Execute asynchronous queries across certificate transparency logs, DNS tables, and web archives without touching target infrastructure.")
+                Text("Execute asynchronous queries across certificate transparency logs, DNS tables, and web archives. Background tasks continue if app is minimized.")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -452,7 +487,6 @@ struct ContentView: View {
 
     private func dashboardResultsSection(for record: ScanRecord) -> some View {
         VStack(spacing: 0) {
-            // Metrics Strip
             HStack(spacing: 8) {
                 metricBox(title: "IDENTIFIERS", value: "\(record.subdomains.count)", color: .blue)
                 metricBox(title: "LATENCY", value: String(format: "%.2fs", record.duration), color: .orange)
@@ -461,7 +495,6 @@ struct ContentView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            // Filtering Bar
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "line.3.horizontal.decrease")
@@ -479,7 +512,6 @@ struct ContentView: View {
                         .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
                 )
 
-                // Favorite Toggle
                 Button {
                     HapticEngine.shared.feedbackRigid()
                     onlyFavorites.toggle()
@@ -495,7 +527,6 @@ struct ContentView: View {
                         )
                 }
 
-                // Sort Menu
                 Menu {
                     Picker("Sort", selection: $sortOption) {
                         ForEach(SortOption.allCases) { (opt: SortOption) in
@@ -521,7 +552,6 @@ struct ContentView: View {
             .padding(.horizontal)
             .padding(.bottom, 6)
 
-            // Results List
             List {
                 Section {
                     ForEach(filteredResults, id: \.self) { (sub: String) in
@@ -732,7 +762,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Business Logic
+    // MARK: - Background Task & Scan Execution
 
     private func executeDiscovery(_ domain: String) {
         let clean = domain.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -740,6 +770,15 @@ struct ContentView: View {
 
         HapticEngine.shared.feedbackMedium()
         store.isScanning = true
+
+        // 1. Pyydetään iOS:lta tausta-aikaa (Background Task Execution)
+        var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "DomainScanner-\(clean)") {
+            if backgroundTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskId)
+                backgroundTaskId = .invalid
+            }
+        }
 
         Task {
             let res = await engine.scan(apex: clean)
@@ -756,6 +795,19 @@ struct ContentView: View {
                 self.store.recordScan(newRecord)
                 HapticEngine.shared.feedbackSuccess()
                 triggerSnackbar("Discovered \(res.subdomains.count) endpoints in \(String(format: "%.2f", res.duration))s")
+
+                // 2. Lähetetään paikallinen ilmoitus käyttäjälle
+                NotificationManager.shared.dispatchCompletionNotification(
+                    domain: res.domain,
+                    count: res.subdomains.count,
+                    duration: res.duration
+                )
+
+                // 3. Päätetään taustaprosessi
+                if backgroundTaskId != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTaskId)
+                    backgroundTaskId = .invalid
+                }
             }
         }
     }
