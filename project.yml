@@ -2,17 +2,22 @@ name: DomainScanner
 options:
   bundleIdPrefix: com.scanner
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "26.0"
 targets:
   DomainScanner:
     type: application
     platform: iOS
     sources:
       - DomainScanner
+    info:
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        UIRequiresFullScreen: YES
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.scanner.domainrecon
-      INFOPLIST_KEY_UILaunchScreen_Generation: YES
-      INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
       CODE_SIGNING_ALLOWED: NO
       CODE_SIGNING_REQUIRED: NO
       CODE_SIGN_IDENTITY: ""
